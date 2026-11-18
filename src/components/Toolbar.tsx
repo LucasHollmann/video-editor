@@ -7,6 +7,8 @@ interface Props {
   currentTime: number;
   totalDuration: number;
   onImport: () => void;
+  onAddImage: () => void;
+  onAddTrack: () => void;
   onPlayPause: () => void;
   onSplit: () => void;
   onDelete: () => void;
@@ -28,6 +30,8 @@ export function Toolbar({
   currentTime,
   totalDuration,
   onImport,
+  onAddImage,
+  onAddTrack,
   onPlayPause,
   onSplit,
   onDelete,
@@ -36,6 +40,8 @@ export function Toolbar({
   return (
     <div className="toolbar">
       <button onClick={onImport}>Importar vídeo</button>
+      <button onClick={onAddImage}>Adicionar imagem</button>
+      <button onClick={onAddTrack}>Nova camada</button>
       <button onClick={onPlayPause} disabled={totalDuration === 0}>
         {isPlaying ? "Pausar" : "Reproduzir"}
       </button>
