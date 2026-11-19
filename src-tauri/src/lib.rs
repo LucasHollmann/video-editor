@@ -8,6 +8,10 @@ pub struct VideoInfo {
     pub height: u32,
 }
 
+fn default_rotation() -> f64 {
+    0.0
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransformExport {
@@ -16,14 +20,25 @@ pub struct TransformExport {
     pub width: f64,
     pub height: f64,
     pub opacity: f64,
+    #[serde(default = "default_rotation")]
+    pub rotation: f64,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PositionKeyframeExport {
+pub struct TransformKeyframeExport {
     pub time: f64,
     pub x: f64,
     pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub opacity: f64,
+    pub rotation: f64,
+    pub volume: f64,
+}
+
+fn default_volume() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,11 +46,14 @@ pub struct PositionKeyframeExport {
 pub struct ClipExport {
     pub kind: String,
     pub source_path: String,
+    pub start: f64,
     pub in_point: f64,
     pub out_point: f64,
     pub transform: TransformExport,
     #[serde(default)]
-    pub position_keyframes: Vec<PositionKeyframeExport>,
+    pub keyframes: Vec<TransformKeyframeExport>,
+    #[serde(default = "default_volume")]
+    pub volume: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,7 +81,7 @@ fn run_command(program: &str, args: &[&str]) -> Result<std::process::Output, Str
 }
 
 #[tauri::command]
-fn probe_video(path: String) -> Result<VideoInfo, String> {
+fn probe_media(path: String) -> Result<VideoInfo, String> {
     let output = run_command(
         "ffprobe",
         &[
@@ -87,18 +105,19 @@ fn probe_video(path: String) -> Result<VideoInfo, String> {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("failed to parse ffprobe output: {}", e))?;
 
+    // Static images have no duration field (or report "N/A"); default to 0 rather
+    // than failing, so width/height can still be read for aspect-ratio sizing.
     let duration: f64 = json["format"]["duration"]
         .as_str()
         .and_then(|s| s.parse().ok())
-        .ok_or("could not read duration")?;
+        .unwrap_or(0.0);
 
     let video_stream = json["streams"]
         .as_array()
-        .and_then(|streams| streams.iter().find(|s| s["codec_type"] == "video"))
-        .ok_or("no video stream found")?;
+        .and_then(|streams| streams.iter().find(|s| s["codec_type"] == "video"));
 
-    let width = video_stream["width"].as_u64().unwrap_or(0) as u32;
-    let height = video_stream["height"].as_u64().unwrap_or(0) as u32;
+    let width = video_stream.and_then(|s| s["width"].as_u64()).unwrap_or(0) as u32;
+    let height = video_stream.and_then(|s| s["height"].as_u64()).unwrap_or(0) as u32;
 
     Ok(VideoInfo {
         duration,
@@ -120,6 +139,14 @@ fn even_dim(v: f64) -> i64 {
     } else {
         r + 1
     }
+}
+
+// The on-screen bounding box of a `w` x `h` rectangle rotated by `degrees`.
+fn rotated_bbox(w: f64, h: f64, degrees: f64) -> (f64, f64) {
+    let rad = degrees.to_radians();
+    let rot_w = (w * rad.cos()).abs() + (h * rad.sin()).abs();
+    let rot_h = (w * rad.sin()).abs() + (h * rad.cos()).abs();
+    (rot_w, rot_h)
 }
 
 // Builds an ffmpeg time expression (in terms of the output timeline's `t`) for one
@@ -173,20 +200,15 @@ fn export_timeline(
     let mut placed: Vec<PlacedClip> = Vec::new();
     let mut total_duration = 0.0_f64;
 
-    for track in &tracks {
-        let mut cursor = 0.0_f64;
+    for track in tracks.iter().rev() {
         for clip in &track.clips {
             let duration = (clip.out_point - clip.in_point).max(0.0);
             if duration > 0.0 {
-                placed.push(PlacedClip {
-                    clip,
-                    start: cursor,
-                    duration,
-                });
+                let start = clip.start.max(0.0);
+                total_duration = total_duration.max(start + duration);
+                placed.push(PlacedClip { clip, start, duration });
             }
-            cursor += duration;
         }
-        total_duration = total_duration.max(cursor);
     }
 
     if placed.is_empty() || total_duration <= 0.0 {
@@ -227,26 +249,115 @@ fn export_timeline(
             args.push(format!("{:.3}", pc.duration));
             args.push("-i".into());
             args.push(clip.source_path.clone());
+        }
 
+        let has_keyframes = !clip.keyframes.is_empty();
+
+        if clip.kind == "video" || clip.kind == "audio" {
             let ms = (start * 1000.0).round() as i64;
             let label = format!("a{}", i);
-            filter_parts.push(format!("[{}:a]adelay={}:all=1[{}]", input_index, ms, label));
+            let volume_filter = if has_keyframes {
+                let volume_keyframes: Vec<(f64, f64)> = clip.keyframes.iter().map(|k| (k.time, k.volume)).collect();
+                let volume_expr = position_axis_expr(&volume_keyframes, start, clip.volume);
+                format!("volume='max(({}),0)':eval=frame", volume_expr)
+            } else {
+                format!("volume={:.3}", clip.volume.max(0.0))
+            };
+            filter_parts.push(format!(
+                "[{}:a]adelay={}:all=1,{}[{}]",
+                input_index, ms, volume_filter, label
+            ));
             audio_labels.push(label);
         }
 
-        let w = even_dim(clip.transform.width);
-        let h = even_dim(clip.transform.height);
-        let opacity = clip.transform.opacity.clamp(0.0, 1.0);
+        if clip.kind == "audio" {
+            // Audio-only clip: no visual contribution to the composited video.
+            continue;
+        }
 
-        let x_keyframes: Vec<(f64, f64)> = clip.position_keyframes.iter().map(|k| (k.time, k.x)).collect();
-        let y_keyframes: Vec<(f64, f64)> = clip.position_keyframes.iter().map(|k| (k.time, k.y)).collect();
-        let x_expr = position_axis_expr(&x_keyframes, start, clip.transform.x);
-        let y_expr = position_axis_expr(&y_keyframes, start, clip.transform.y);
+        // Base (static) dimensions, used for the rotation bounding-box/centering
+        // math even when width/height are themselves animated (an approximation:
+        // the rotation shift doesn't re-track an animated size).
+        let base_w = even_dim(clip.transform.width);
+        let base_h = even_dim(clip.transform.height);
+
+        let x_keyframes: Vec<(f64, f64)> = clip.keyframes.iter().map(|k| (k.time, k.x)).collect();
+        let y_keyframes: Vec<(f64, f64)> = clip.keyframes.iter().map(|k| (k.time, k.y)).collect();
+        let width_keyframes: Vec<(f64, f64)> = clip.keyframes.iter().map(|k| (k.time, k.width)).collect();
+        let height_keyframes: Vec<(f64, f64)> = clip.keyframes.iter().map(|k| (k.time, k.height)).collect();
+        let opacity_keyframes: Vec<(f64, f64)> = clip.keyframes.iter().map(|k| (k.time, k.opacity)).collect();
+        let rotation_keyframes: Vec<(f64, f64)> = clip.keyframes.iter().map(|k| (k.time, k.rotation)).collect();
+
+        // Width/height: a plain even number normally, or a per-frame expression
+        // (rounded to even inside the expression itself) when animated.
+        let (scale_w, scale_h, eval_frame) = if has_keyframes {
+            let w_expr = position_axis_expr(&width_keyframes, start, clip.transform.width);
+            let h_expr = position_axis_expr(&height_keyframes, start, clip.transform.height);
+            (
+                format!("trunc(({})/2)*2", w_expr),
+                format!("trunc(({})/2)*2", h_expr),
+                ":eval=frame",
+            )
+        } else {
+            (base_w.to_string(), base_h.to_string(), "")
+        };
+
+        // Opacity: colorchannelmixer is fast but takes a constant; when animated,
+        // fall back to geq to multiply the existing alpha by a time expression.
+        let opacity_filter = if has_keyframes {
+            let opacity_expr = position_axis_expr(&opacity_keyframes, start, clip.transform.opacity);
+            format!(
+                "geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*clip({},0,1)'",
+                opacity_expr
+            )
+        } else {
+            format!("colorchannelmixer=aa={:.3}", clip.transform.opacity.clamp(0.0, 1.0))
+        };
+
+        // Rotation: a constant angle (with ffmpeg's own rotw()/roth() helpers for
+        // the output size) or a per-frame expression over a fixed worst-case box
+        // sized from every keyframe's angle, so the canvas size stays constant.
+        let (x_shift, y_shift, rotate_filter) = if has_keyframes {
+            let max_abs_rotation = rotation_keyframes
+                .iter()
+                .map(|(_, r)| r.abs())
+                .fold(clip.transform.rotation.abs(), f64::max);
+            let (fixed_w, fixed_h) = rotated_bbox(base_w as f64, base_h as f64, max_abs_rotation);
+            if fixed_w - base_w as f64 > 0.5 || fixed_h - base_h as f64 > 0.5 {
+                let rot_expr = position_axis_expr(&rotation_keyframes, start, clip.transform.rotation);
+                let filter = format!(
+                    ",rotate=a='({})*PI/180':fillcolor=none:ow={:.0}:oh={:.0}",
+                    rot_expr, fixed_w, fixed_h
+                );
+                ((fixed_w - base_w as f64) / 2.0, (fixed_h - base_h as f64) / 2.0, filter)
+            } else {
+                (0.0, 0.0, String::new())
+            }
+        } else if clip.transform.rotation.abs() > 0.01 {
+            let rotation = clip.transform.rotation;
+            let (rot_w, rot_h) = rotated_bbox(base_w as f64, base_h as f64, rotation);
+            let filter = format!(
+                ",rotate={rot:.6}*PI/180:fillcolor=none:ow=rotw({rot:.6}*PI/180):oh=roth({rot:.6}*PI/180)",
+                rot = rotation
+            );
+            ((rot_w - base_w as f64) / 2.0, (rot_h - base_h as f64) / 2.0, filter)
+        } else {
+            (0.0, 0.0, String::new())
+        };
+
+        let mut x_expr = position_axis_expr(&x_keyframes, start, clip.transform.x);
+        let mut y_expr = position_axis_expr(&y_keyframes, start, clip.transform.y);
+        if x_shift != 0.0 {
+            x_expr = format!("(({})-({:.3}))", x_expr, x_shift);
+        }
+        if y_shift != 0.0 {
+            y_expr = format!("(({})-({:.3}))", y_expr, y_shift);
+        }
 
         let scaled_label = format!("v{}", i);
         filter_parts.push(format!(
-            "[{}:v]scale={}:{},format=yuva420p,colorchannelmixer=aa={:.3},setpts=PTS-STARTPTS+({:.3}/TB)[{}]",
-            input_index, w, h, opacity, start, scaled_label
+            "[{}:v]scale=w='{}':h='{}'{},format=yuva420p,{}{},setpts=PTS-STARTPTS+({:.3}/TB)[{}]",
+            input_index, scale_w, scale_h, eval_frame, opacity_filter, rotate_filter, start, scaled_label
         ));
 
         let out_label = format!("ov{}", i);
@@ -316,7 +427,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![probe_video, export_timeline])
+        .invoke_handler(tauri::generate_handler![probe_media, export_timeline])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
