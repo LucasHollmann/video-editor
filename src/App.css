@@ -98,12 +98,81 @@ body {
 
 .inspector {
   display: flex;
-  align-items: center;
-  gap: 14px;
+  flex-direction: column;
+  gap: 6px;
   padding: 6px 12px;
   background: #2a2b2e;
   border-top: 1px solid #3a3b3e;
   flex-shrink: 0;
+}
+
+.inspector-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.inspector-add-keyframe {
+  margin-left: auto;
+  background: #3a3b3e;
+  color: #e6e6e6;
+  border: 1px solid #4a4b4e;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.inspector-add-keyframe:hover:not(:disabled) {
+  background: #4a4b4e;
+}
+
+.inspector-add-keyframe:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.keyframe-list {
+  padding-top: 2px;
+}
+
+.keyframe-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #1a1b1d;
+  border: 1px solid #3a3b3e;
+  border-radius: 4px;
+  padding: 4px 6px;
+}
+
+.keyframe-item label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: #a6a6a6;
+}
+
+.keyframe-item input {
+  width: 56px;
+  background: #242528;
+  color: #e6e6e6;
+  border: 1px solid #4a4b4e;
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 11px;
+}
+
+.keyframe-item button {
+  background: #3a3b3e;
+  color: #e6e6e6;
+  border: 1px solid #4a4b4e;
+  border-radius: 3px;
+  padding: 1px 6px;
+  cursor: pointer;
+  font-size: 12px;
 }
 
 .inspector-title {

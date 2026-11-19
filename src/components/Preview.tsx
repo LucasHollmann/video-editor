@@ -1,6 +1,14 @@
 import { useEffect, useRef } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { type ClipAtTime, type Track, PROJECT_HEIGHT, PROJECT_WIDTH, activeClipAt, totalDuration } from "../types";
+import {
+  type ClipAtTime,
+  type Track,
+  PROJECT_HEIGHT,
+  PROJECT_WIDTH,
+  activeClipAt,
+  resolvePosition,
+  totalDuration,
+} from "../types";
 
 interface Props {
   tracks: Track[];
@@ -55,16 +63,18 @@ function Layer({ at, isPlaying, seekVersion, zIndex }: LayerProps) {
   }, [isPlaying, at?.clip.kind]);
 
   const transform = at?.clip.transform;
-  const style = transform
-    ? {
-        left: `${(transform.x / PROJECT_WIDTH) * 100}%`,
-        top: `${(transform.y / PROJECT_HEIGHT) * 100}%`,
-        width: `${(transform.width / PROJECT_WIDTH) * 100}%`,
-        height: `${(transform.height / PROJECT_HEIGHT) * 100}%`,
-        opacity: transform.opacity,
-        zIndex,
-      }
-    : undefined;
+  const position = at ? resolvePosition(at.clip, at.localTime) : null;
+  const style =
+    transform && position
+      ? {
+          left: `${(position.x / PROJECT_WIDTH) * 100}%`,
+          top: `${(position.y / PROJECT_HEIGHT) * 100}%`,
+          width: `${(transform.width / PROJECT_WIDTH) * 100}%`,
+          height: `${(transform.height / PROJECT_HEIGHT) * 100}%`,
+          opacity: transform.opacity,
+          zIndex,
+        }
+      : undefined;
 
   const showVideo = at?.clip.kind === "video";
 

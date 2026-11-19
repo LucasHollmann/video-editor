@@ -13,7 +13,11 @@ import {
   PROJECT_WIDTH,
   type Transform,
   activeClipAt,
+  clipDuration,
+  clipStartOnTimeline,
   defaultTransformForTrackIndex,
+  findClipTrack,
+  resolvePosition,
   totalDuration,
 } from "./types";
 import "./App.css";
@@ -33,6 +37,18 @@ export default function App() {
   const duration = totalDuration(state.tracks);
   const selectedTrack = state.tracks.find((t) => t.id === state.selectedTrackId) ?? state.tracks[0] ?? null;
   const selectedClip = state.tracks.flatMap((t) => t.clips).find((c) => c.id === state.selectedClipId) ?? null;
+  const selectedClipTrack = selectedClip ? findClipTrack(state.tracks, selectedClip.id) : null;
+  const selectedClipLocalTime =
+    selectedClip && selectedClipTrack
+      ? Math.min(
+          Math.max(
+            state.playhead -
+              clipStartOnTimeline(selectedClipTrack.clips, selectedClipTrack.clips.findIndex((c) => c.id === selectedClip.id)),
+            0,
+          ),
+          clipDuration(selectedClip),
+        )
+      : null;
 
   // Keep the playhead inside the timeline whenever clips are trimmed/removed.
   useEffect(() => {
@@ -67,6 +83,7 @@ export default function App() {
           inPoint: 0,
           outPoint: info.duration,
           transform: defaultTransformForTrackIndex(trackIndex),
+          positionKeyframes: [],
         },
       });
     } catch (err) {
@@ -92,6 +109,7 @@ export default function App() {
         inPoint: 0,
         outPoint: DEFAULT_IMAGE_DURATION,
         transform: defaultTransformForTrackIndex(trackIndex),
+        positionKeyframes: [],
       },
     });
   }
@@ -151,6 +169,22 @@ export default function App() {
     dispatch({ type: "SET_TRANSFORM", id, patch });
   }
 
+  function handleAddKeyframe() {
+    if (!selectedClip || selectedClipLocalTime == null) return;
+    const { x, y } = resolvePosition(selectedClip, selectedClipLocalTime);
+    dispatch({ type: "ADD_KEYFRAME", id: selectedClip.id, time: selectedClipLocalTime, x, y });
+  }
+
+  function handleUpdateKeyframe(keyframeId: string, patch: { time?: number; x?: number; y?: number }) {
+    if (!selectedClip) return;
+    dispatch({ type: "UPDATE_KEYFRAME", id: selectedClip.id, keyframeId, patch });
+  }
+
+  function handleDeleteKeyframe(keyframeId: string) {
+    if (!selectedClip) return;
+    dispatch({ type: "DELETE_KEYFRAME", id: selectedClip.id, keyframeId });
+  }
+
   async function handleExport() {
     if (state.tracks.every((t) => t.clips.length === 0)) return;
     const target = await save({
@@ -169,6 +203,7 @@ export default function App() {
             inPoint: c.inPoint,
             outPoint: c.outPoint,
             transform: c.transform,
+            positionKeyframes: c.positionKeyframes.map((k) => ({ time: k.time, x: k.x, y: k.y })),
           })),
         })),
         outputPath: target,
@@ -224,7 +259,14 @@ export default function App() {
         onPlayheadChange={handlePlayheadChange}
         onPlayingChange={handlePlayingChange}
       />
-      <Inspector clip={selectedClip} onChange={handleTransformChange} />
+      <Inspector
+        clip={selectedClip}
+        currentLocalTime={selectedClipLocalTime}
+        onChange={handleTransformChange}
+        onAddKeyframe={handleAddKeyframe}
+        onUpdateKeyframe={handleUpdateKeyframe}
+        onDeleteKeyframe={handleDeleteKeyframe}
+      />
       <Timeline
         tracks={state.tracks}
         playhead={state.playhead}

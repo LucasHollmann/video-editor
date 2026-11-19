@@ -1,5 +1,5 @@
 import { useReducer } from "react";
-import { type Clip, type Track, type Transform, totalDuration } from "./types";
+import { type Clip, type PositionKeyframe, type Track, type Transform, totalDuration } from "./types";
 
 export interface EditorState {
   tracks: Track[];
@@ -21,6 +21,9 @@ type Action =
   | { type: "SPLIT_CLIP"; id: string; atLocalTime: number }
   | { type: "TRIM_CLIP"; id: string; inPoint?: number; outPoint?: number }
   | { type: "SET_TRANSFORM"; id: string; patch: Partial<Transform> }
+  | { type: "ADD_KEYFRAME"; id: string; time: number; x: number; y: number }
+  | { type: "UPDATE_KEYFRAME"; id: string; keyframeId: string; patch: Partial<Pick<PositionKeyframe, "time" | "x" | "y">> }
+  | { type: "DELETE_KEYFRAME"; id: string; keyframeId: string }
   | { type: "SET_PLAYHEAD"; time: number; fromPlayback?: boolean };
 
 const MIN_CLIP_LENGTH = 0.1;
@@ -124,8 +127,14 @@ function reducer(state: EditorState, action: Action): EditorState {
       if (splitAt <= clip.inPoint + MIN_CLIP_LENGTH || splitAt >= clip.outPoint - MIN_CLIP_LENGTH) {
         return state;
       }
+      const delta = action.atLocalTime;
       const left: Clip = { ...clip, outPoint: splitAt };
-      const right: Clip = { ...clip, id: crypto.randomUUID(), inPoint: splitAt };
+      const right: Clip = {
+        ...clip,
+        id: crypto.randomUUID(),
+        inPoint: splitAt,
+        positionKeyframes: clip.positionKeyframes.map((k) => ({ ...k, time: k.time - delta })),
+      };
       const tracks = mapTrackClips(state.tracks, track.id, (clips) => {
         const next = [...clips];
         next.splice(location.clipIndex, 1, left, right);
@@ -153,6 +162,46 @@ function reducer(state: EditorState, action: Action): EditorState {
       const tracks = state.tracks.map((t) => ({
         ...t,
         clips: t.clips.map((c) => (c.id === action.id ? { ...c, transform: { ...c.transform, ...action.patch } } : c)),
+      }));
+      return { ...state, tracks };
+    }
+
+    case "ADD_KEYFRAME": {
+      const keyframe: PositionKeyframe = { id: crypto.randomUUID(), time: action.time, x: action.x, y: action.y };
+      const tracks = state.tracks.map((t) => ({
+        ...t,
+        clips: t.clips.map((c) =>
+          c.id === action.id ? { ...c, positionKeyframes: [...c.positionKeyframes, keyframe] } : c,
+        ),
+      }));
+      return { ...state, tracks };
+    }
+
+    case "UPDATE_KEYFRAME": {
+      const tracks = state.tracks.map((t) => ({
+        ...t,
+        clips: t.clips.map((c) =>
+          c.id === action.id
+            ? {
+                ...c,
+                positionKeyframes: c.positionKeyframes.map((k) =>
+                  k.id === action.keyframeId ? { ...k, ...action.patch } : k,
+                ),
+              }
+            : c,
+        ),
+      }));
+      return { ...state, tracks };
+    }
+
+    case "DELETE_KEYFRAME": {
+      const tracks = state.tracks.map((t) => ({
+        ...t,
+        clips: t.clips.map((c) =>
+          c.id === action.id
+            ? { ...c, positionKeyframes: c.positionKeyframes.filter((k) => k.id !== action.keyframeId) }
+            : c,
+        ),
       }));
       return { ...state, tracks };
     }

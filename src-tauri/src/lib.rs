@@ -20,12 +20,22 @@ pub struct TransformExport {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PositionKeyframeExport {
+    pub time: f64,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClipExport {
     pub kind: String,
     pub source_path: String,
     pub in_point: f64,
     pub out_point: f64,
     pub transform: TransformExport,
+    #[serde(default)]
+    pub position_keyframes: Vec<PositionKeyframeExport>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +122,47 @@ fn even_dim(v: f64) -> i64 {
     }
 }
 
+// Builds an ffmpeg time expression (in terms of the output timeline's `t`) for one
+// position axis (x or y), piecewise-linearly interpolating between keyframes. Each
+// keyframe's `time` is local to the clip, so it's offset by `global_start` (the
+// clip's start on the exported timeline). With no keyframes, falls back to a
+// constant. Before the first keyframe / after the last, the value holds steady.
+fn position_axis_expr(keyframes: &[(f64, f64)], global_start: f64, fallback: f64) -> String {
+    if keyframes.is_empty() {
+        return format!("{:.3}", fallback);
+    }
+    let mut sorted = keyframes.to_vec();
+    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+    if sorted.len() == 1 {
+        return format!("{:.3}", sorted[0].1);
+    }
+
+    let last = sorted.len() - 1;
+    let mut expr = format!("{:.3}", sorted[last].1);
+    for i in (0..last).rev() {
+        let (t0, v0) = sorted[i];
+        let (t1, v1) = sorted[i + 1];
+        let boundary = global_start + t1;
+        let span = (t1 - t0).max(0.001);
+        let segment = format!(
+            "({v0:.3}+({v1:.3}-{v0:.3})*(t-{seg_start:.3})/{span:.3})",
+            v0 = v0,
+            v1 = v1,
+            seg_start = global_start + t0,
+            span = span
+        );
+        expr = format!("if(lte(t,{boundary:.3}),{segment},{expr})", boundary = boundary, segment = segment, expr = expr);
+    }
+    let first_boundary = global_start + sorted[0].0;
+    format!(
+        "if(lt(t,{boundary:.3}),{value:.3},{expr})",
+        boundary = first_boundary,
+        value = sorted[0].1,
+        expr = expr
+    )
+}
+
 #[tauri::command]
 fn export_timeline(
     tracks: Vec<TrackExport>,
@@ -185,9 +236,12 @@ fn export_timeline(
 
         let w = even_dim(clip.transform.width);
         let h = even_dim(clip.transform.height);
-        let x = clip.transform.x.round() as i64;
-        let y = clip.transform.y.round() as i64;
         let opacity = clip.transform.opacity.clamp(0.0, 1.0);
+
+        let x_keyframes: Vec<(f64, f64)> = clip.position_keyframes.iter().map(|k| (k.time, k.x)).collect();
+        let y_keyframes: Vec<(f64, f64)> = clip.position_keyframes.iter().map(|k| (k.time, k.y)).collect();
+        let x_expr = position_axis_expr(&x_keyframes, start, clip.transform.x);
+        let y_expr = position_axis_expr(&y_keyframes, start, clip.transform.y);
 
         let scaled_label = format!("v{}", i);
         filter_parts.push(format!(
@@ -197,8 +251,8 @@ fn export_timeline(
 
         let out_label = format!("ov{}", i);
         filter_parts.push(format!(
-            "[{}][{}]overlay=x={}:y={}:enable='between(t,{:.3},{:.3})'[{}]",
-            video_label, scaled_label, x, y, start, end, out_label
+            "[{}][{}]overlay=x='{}':y='{}':enable='between(t,{:.3},{:.3})'[{}]",
+            video_label, scaled_label, x_expr, y_expr, start, end, out_label
         ));
         video_label = out_label;
     }
